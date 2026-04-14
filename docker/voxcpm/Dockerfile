@@ -1,7 +1,15 @@
 # VoxCPM API Server — OpenAI-compatible TTS for aarch64 DGX Spark
-# Base image mirrors docker/whisper/Dockerfile in dgx-spark-ai-cluster
-# (CUDA 12.8 + cuDNN on Ubuntu 24.04) for proven aarch64 compatibility.
-FROM nvidia/cuda:12.8.0-cudnn-runtime-ubuntu24.04
+#
+# Uses the NVIDIA NGC PyTorch container as the base. This is the only
+# supported path for CUDA-enabled torch on aarch64 — download.pytorch.org
+# publishes aarch64 wheels but only in CPU flavor, so a plain
+# `nvidia/cuda` base image ends up running VoxCPM on the CPU.
+#
+# NGC tags follow YY.MM. 25.02 ships Python 3.12 + torch 2.6 + CUDA 12.8,
+# which matches the DGX Spark host software stack. Override with
+# --build-arg BASE_IMAGE=... if you need a different release.
+ARG BASE_IMAGE=nvcr.io/nvidia/pytorch:25.02-py3
+FROM ${BASE_IMAGE}
 
 LABEL maintainer="jinwangmok"
 LABEL description="VoxCPM2 TTS server exposing OpenAI /v1/audio/speech on aarch64 DGX Spark"
@@ -11,43 +19,28 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
+# Runtime system deps. NGC already provides python3, torch, torchaudio,
+# CUDA, cuDNN, and build toolchain, so we only add audio IO + git.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        python3.12 \
-        python3.12-venv \
-        python3.12-dev \
-        python3-pip \
-        build-essential \
         git \
-        curl \
         ffmpeg \
         libsndfile1 \
     && rm -rf /var/lib/apt/lists/*
 
-RUN python3.12 -m venv /opt/venv
-ENV PATH="/opt/venv/bin:$PATH"
-
-RUN pip install --upgrade pip setuptools wheel
-
-# PyTorch first (CUDA 12.8 wheels). aarch64 wheels are published on the
-# default index for recent torch releases; if resolution fails on a given
-# host, override TORCH_INDEX_URL at build time.
-ARG TORCH_INDEX_URL=https://download.pytorch.org/whl/cu128
-RUN pip install --index-url ${TORCH_INDEX_URL} \
-        torch==2.5.1 \
-        torchaudio==2.5.1 \
-    || pip install torch==2.5.1 torchaudio==2.5.1
-
+# Install server deps into NGC's system Python (no venv — NGC's torch
+# lives in /usr/local/lib/python*/dist-packages and isolating breaks it).
 COPY requirements.txt /tmp/requirements.txt
-RUN pip install -r /tmp/requirements.txt
+RUN pip install --no-cache-dir -r /tmp/requirements.txt
 
 # Install VoxCPM from source — not on PyPI at the time of writing.
 ARG VOXCPM_REF=main
-RUN pip install "git+https://github.com/OpenBMB/VoxCPM.git@${VOXCPM_REF}"
+RUN pip install --no-cache-dir "git+https://github.com/OpenBMB/VoxCPM.git@${VOXCPM_REF}"
 
 WORKDIR /app
 COPY server.py /app/server.py
 
-# Unified cache under /data/models/voxcpm matches whisper convention.
+# Unified cache under /data/models/voxcpm matches the whisper convention
+# in dgx-spark-ai-cluster.
 ENV VOXCPM_MODEL=openbmb/VoxCPM2 \
     VOXCPM_PORT=9100 \
     HF_HOME=/data/models \
