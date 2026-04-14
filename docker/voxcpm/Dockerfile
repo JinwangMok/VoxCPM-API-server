@@ -1,25 +1,17 @@
-# VoxCPM API Server — OpenAI-compatible TTS for aarch64 DGX Spark
+# VoxCPM API Server — OpenAI-compatible TTS for aarch64 DGX Spark (GB10).
 #
-# Uses the NVIDIA NGC PyTorch container as the base. This is the only
-# supported path for CUDA-enabled torch on aarch64 — download.pytorch.org
-# publishes aarch64 wheels but only in CPU flavor, so a plain
-# `nvidia/cuda` base image ends up running VoxCPM on the CPU.
-#
-# NGC tags follow YY.MM. 26.02-py3 is the first confirmed-working tag on
-# DGX Spark (GB10 / Blackwell, compute capability sm_121). NGC 25.02 does
-# not ship CUDA kernels for Blackwell and degrades VoxCPM to the CPU.
-# Per NVIDIA PyTorch maintainers: "all of our ARM binaries built with
-# CUDA >= 12.8 support DGX Spark already" because sm_121 is binary
-# compatible with sm_120, which NGC 25.12+ includes. 25.12 has a known
-# torchaudio incompatibility on DGX Spark, so 26.02 is the safer default.
-#
-# Override with --build-arg BASE_IMAGE=... if you need a different release.
+# Uses the lean nvidia/cuda base image and installs torch/torchvision/
+# torchaudio from download.pytorch.org/whl/cu130 — the approach the
+# PyTorch maintainers recommend for DGX Spark (GB10, sm_121). NGC's
+# bundled pytorch containers were tried first but:
+#   - 25.02 ships no CUDA kernels for Blackwell (VoxCPM fell to CPU)
+#   - 25.12 has a known torchaudio incompatibility on DGX Spark
+#   - 26.02 ships no torchaudio at all (unresolved upstream issue)
 #
 # References:
 #   https://discuss.pytorch.org/t/dgx-spark-gb10-cuda-13-0-python-3-12-sm-121/223744
 #   https://forums.developer.nvidia.com/t/incompatibility-of-torchaudio-in-ngc-pytorch-container-25-12-on-dgx-spark-blackwell-gb10/357745
-ARG BASE_IMAGE=nvcr.io/nvidia/pytorch:26.02-py3
-FROM ${BASE_IMAGE}
+FROM nvidia/cuda:13.0.0-cudnn-runtime-ubuntu24.04
 
 LABEL maintainer="jinwangmok"
 LABEL description="VoxCPM2 TTS server exposing OpenAI /v1/audio/speech on aarch64 DGX Spark"
@@ -29,24 +21,42 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
-# Runtime system deps. NGC already provides python3, torch, torchaudio,
-# CUDA, cuDNN, and build toolchain, so we only add audio IO + git.
 RUN apt-get update && apt-get install -y --no-install-recommends \
+        python3.12 \
+        python3.12-venv \
+        python3.12-dev \
+        python3-pip \
+        build-essential \
         git \
+        curl \
         ffmpeg \
         libsndfile1 \
     && rm -rf /var/lib/apt/lists/*
 
-# Install server deps first.
-COPY requirements.txt /tmp/requirements.txt
-RUN pip install --no-cache-dir -r /tmp/requirements.txt
+RUN python3.12 -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+RUN pip install --upgrade pip setuptools wheel
 
-# Install VoxCPM's runtime deps *without* torch/torchaudio — NGC ships
-# a CUDA-enabled torch in /opt/venv and a transitive reinstall from
-# PyPI would clobber it with a CPU-only aarch64 wheel, which silently
-# sends VoxCPM to the CPU. `gradio` is also dropped: the API server has
-# no need for the Gradio demo UI and it drags in a heavy dep tree.
-RUN pip install --no-cache-dir \
+# Install torch stack from PyTorch's cu130 aarch64 index. These wheels
+# are the only officially-published ARM + CUDA 13 torch binaries, and
+# per the PyTorch forum they support DGX Spark (sm_121 is binary-
+# compatible with sm_120, which the wheels include). Pin major versions
+# loosely and rely on the index to pick a compatible tuple.
+RUN pip install --index-url https://download.pytorch.org/whl/cu130 \
+        torch \
+        torchvision \
+        torchaudio
+
+# Non-torch runtime deps for the FastAPI surface.
+COPY requirements.txt /tmp/requirements.txt
+RUN pip install -r /tmp/requirements.txt
+
+# VoxCPM runtime deps, *excluding* torch/torchaudio/gradio so pip cannot
+# reinstall them from PyPI (which would clobber our cu130 torch with
+# CPU-only wheels). gradio is dropped because the API server has no
+# need for the demo UI. torchcodec and funasr pull in additional audio
+# stacks that voxcpm actually uses at runtime.
+RUN pip install \
         "transformers>=4.36.2" \
         einops \
         inflect \
@@ -66,23 +76,19 @@ RUN pip install --no-cache-dir \
         safetensors \
         torchcodec
 
-# Install VoxCPM from source with --no-deps so pip does not re-resolve
-# torch/torchaudio/gradio. Not on PyPI at the time of writing.
+# Install VoxCPM itself with --no-deps so pip does not re-resolve torch.
 ARG VOXCPM_REF=main
-RUN pip install --no-cache-dir --no-deps \
+RUN pip install --no-deps \
         "git+https://github.com/OpenBMB/VoxCPM.git@${VOXCPM_REF}"
 
-# Sanity check: fail the build if the installed torch was not compiled
-# with CUDA. torch.cuda.is_available() would always be False at build
-# time (no GPU visible to buildkit), so we check torch.version.cuda —
-# which is None for CPU wheels and a string like "12.8" for NGC builds.
-RUN python3 -c "import torch, sys; v = torch.version.cuda; print('torch', torch.__version__, 'cuda', v); sys.exit(0 if v else 1)"
+# Sanity check at build time: installed torch must be a CUDA build and
+# torchaudio must import cleanly. Fails the build on regression instead
+# of silently degrading at runtime.
+RUN python3 -c "import torch, torchaudio, sys; v = torch.version.cuda; print('torch', torch.__version__, 'cuda', v, 'torchaudio', torchaudio.__version__); sys.exit(0 if v else 1)"
 
 WORKDIR /app
 COPY server.py /app/server.py
 
-# Unified cache under /data/models/voxcpm matches the whisper convention
-# in dgx-spark-ai-cluster.
 ENV VOXCPM_MODEL=openbmb/VoxCPM2 \
     VOXCPM_PORT=9100 \
     HF_HOME=/data/models \
