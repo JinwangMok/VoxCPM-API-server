@@ -28,9 +28,10 @@ from typing import Optional
 import numpy as np
 import soundfile as sf
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 import uvicorn
+import struct
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("voxcpm-server")
@@ -112,6 +113,13 @@ class SpeechRequest(BaseModel):
     # VoxCPM-specific knobs, exposed as optional extensions.
     cfg_value: Optional[float] = None
     inference_timesteps: Optional[int] = None
+    # Streaming extension. When true, the response uses HTTP chunked
+    # transfer encoding and yields audio as VoxCPM produces it, so the
+    # client starts receiving bytes before synthesis is complete.
+    # Only pcm and wav response formats are supported for streaming —
+    # lossy formats need a full buffer pass to encode. Default false to
+    # preserve OpenAI-compatible buffered behavior.
+    stream: bool = False
 
 
 @app.get("/health")
@@ -173,6 +181,45 @@ def _encode_audio(wav: np.ndarray, sample_rate: int, fmt: str) -> bytes:
     return proc.stdout
 
 
+def _wav_streaming_header(sample_rate: int, channels: int = 1, bits: int = 16) -> bytes:
+    """Minimal WAV/RIFF header with 'unknown length' sentinels.
+
+    When streaming, total length is unknown in advance. We emit 0xFFFFFFFF
+    in the RIFF and data chunk size fields — most players (ffplay, VLC,
+    mpv, web audio) treat that as an open-ended stream and just keep
+    reading until EOF. Standard 44-byte PCM header layout.
+    """
+    byte_rate = sample_rate * channels * bits // 8
+    block_align = channels * bits // 8
+    max_size = 0xFFFFFFFF
+    return (
+        b"RIFF"
+        + struct.pack("<I", max_size)
+        + b"WAVE"
+        + b"fmt "
+        + struct.pack("<I", 16)          # fmt chunk size
+        + struct.pack("<H", 1)           # PCM format
+        + struct.pack("<H", channels)
+        + struct.pack("<I", sample_rate)
+        + struct.pack("<I", byte_rate)
+        + struct.pack("<H", block_align)
+        + struct.pack("<H", bits)
+        + b"data"
+        + struct.pack("<I", max_size)
+    )
+
+
+def _chunk_to_pcm16_bytes(chunk) -> bytes:
+    """Convert a VoxCPM streaming chunk (float32 numpy) to 16-bit LE PCM."""
+    arr = np.asarray(chunk)
+    if arr.ndim > 1:
+        arr = np.squeeze(arr)
+    if arr.dtype != np.float32:
+        arr = arr.astype(np.float32)
+    arr = np.clip(arr, -1.0, 1.0)
+    return (arr * 32767.0).astype("<i2").tobytes()
+
+
 @app.post("/v1/audio/speech")
 async def speech(req: SpeechRequest):
     model = get_model()
@@ -201,6 +248,38 @@ async def speech(req: SpeechRequest):
         os.environ.get("VOXCPM_TIMESTEPS", "10")
     )
 
+    sample_rate = model.tts_model.sample_rate
+    fmt = req.response_format.lower()
+
+    # --- Streaming branch -------------------------------------------------
+    if req.stream:
+        if fmt not in ("pcm", "wav"):
+            raise HTTPException(
+                status_code=400,
+                detail=f"streaming only supports pcm or wav, not {fmt}",
+            )
+
+        def iter_audio():
+            if fmt == "wav":
+                yield _wav_streaming_header(sample_rate)
+            try:
+                for chunk in model.generate_streaming(
+                    text=prompt_text,
+                    cfg_value=cfg_value,
+                    inference_timesteps=timesteps,
+                ):
+                    yield _chunk_to_pcm16_bytes(chunk)
+            except Exception:
+                logger.exception("voxcpm streaming failed")
+                # Can't raise HTTPException mid-stream; just truncate.
+                return
+
+        return StreamingResponse(
+            iter_audio(),
+            media_type=CONTENT_TYPES.get(fmt, "application/octet-stream"),
+        )
+
+    # --- Buffered branch (default, OpenAI-compatible) --------------------
     try:
         wav = model.generate(
             text=prompt_text,
@@ -211,11 +290,10 @@ async def speech(req: SpeechRequest):
         logger.exception("voxcpm generate failed")
         raise HTTPException(status_code=500, detail="speech synthesis failed")
 
-    sample_rate = model.tts_model.sample_rate
     audio_bytes = _encode_audio(np.asarray(wav), sample_rate, req.response_format)
     return Response(
         content=audio_bytes,
-        media_type=CONTENT_TYPES.get(req.response_format.lower(), "application/octet-stream"),
+        media_type=CONTENT_TYPES.get(fmt, "application/octet-stream"),
     )
 
 
