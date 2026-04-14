@@ -5,10 +5,20 @@
 # publishes aarch64 wheels but only in CPU flavor, so a plain
 # `nvidia/cuda` base image ends up running VoxCPM on the CPU.
 #
-# NGC tags follow YY.MM. 25.02 ships Python 3.12 + torch 2.6 + CUDA 12.8,
-# which matches the DGX Spark host software stack. Override with
-# --build-arg BASE_IMAGE=... if you need a different release.
-ARG BASE_IMAGE=nvcr.io/nvidia/pytorch:25.02-py3
+# NGC tags follow YY.MM. 26.02-py3 is the first confirmed-working tag on
+# DGX Spark (GB10 / Blackwell, compute capability sm_121). NGC 25.02 does
+# not ship CUDA kernels for Blackwell and degrades VoxCPM to the CPU.
+# Per NVIDIA PyTorch maintainers: "all of our ARM binaries built with
+# CUDA >= 12.8 support DGX Spark already" because sm_121 is binary
+# compatible with sm_120, which NGC 25.12+ includes. 25.12 has a known
+# torchaudio incompatibility on DGX Spark, so 26.02 is the safer default.
+#
+# Override with --build-arg BASE_IMAGE=... if you need a different release.
+#
+# References:
+#   https://discuss.pytorch.org/t/dgx-spark-gb10-cuda-13-0-python-3-12-sm-121/223744
+#   https://forums.developer.nvidia.com/t/incompatibility-of-torchaudio-in-ngc-pytorch-container-25-12-on-dgx-spark-blackwell-gb10/357745
+ARG BASE_IMAGE=nvcr.io/nvidia/pytorch:26.02-py3
 FROM ${BASE_IMAGE}
 
 LABEL maintainer="jinwangmok"
