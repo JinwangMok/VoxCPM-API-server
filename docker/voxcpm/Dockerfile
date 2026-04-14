@@ -27,14 +27,46 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libsndfile1 \
     && rm -rf /var/lib/apt/lists/*
 
-# Install server deps into NGC's system Python (no venv — NGC's torch
-# lives in /usr/local/lib/python*/dist-packages and isolating breaks it).
+# Install server deps first.
 COPY requirements.txt /tmp/requirements.txt
 RUN pip install --no-cache-dir -r /tmp/requirements.txt
 
-# Install VoxCPM from source — not on PyPI at the time of writing.
+# Install VoxCPM's runtime deps *without* torch/torchaudio — NGC ships
+# a CUDA-enabled torch in /opt/venv and a transitive reinstall from
+# PyPI would clobber it with a CPU-only aarch64 wheel, which silently
+# sends VoxCPM to the CPU. `gradio` is also dropped: the API server has
+# no need for the Gradio demo UI and it drags in a heavy dep tree.
+RUN pip install --no-cache-dir \
+        "transformers>=4.36.2" \
+        einops \
+        inflect \
+        addict \
+        wetext \
+        "modelscope>=1.22.0" \
+        "datasets>=3,<4" \
+        huggingface-hub \
+        pydantic \
+        tqdm \
+        simplejson \
+        sortedcontainers \
+        librosa \
+        matplotlib \
+        funasr \
+        argbind \
+        safetensors \
+        torchcodec
+
+# Install VoxCPM from source with --no-deps so pip does not re-resolve
+# torch/torchaudio/gradio. Not on PyPI at the time of writing.
 ARG VOXCPM_REF=main
-RUN pip install --no-cache-dir "git+https://github.com/OpenBMB/VoxCPM.git@${VOXCPM_REF}"
+RUN pip install --no-cache-dir --no-deps \
+        "git+https://github.com/OpenBMB/VoxCPM.git@${VOXCPM_REF}"
+
+# Sanity check: fail the build if the installed torch was not compiled
+# with CUDA. torch.cuda.is_available() would always be False at build
+# time (no GPU visible to buildkit), so we check torch.version.cuda —
+# which is None for CPU wheels and a string like "12.8" for NGC builds.
+RUN python3 -c "import torch, sys; v = torch.version.cuda; print('torch', torch.__version__, 'cuda', v); sys.exit(0 if v else 1)"
 
 WORKDIR /app
 COPY server.py /app/server.py
