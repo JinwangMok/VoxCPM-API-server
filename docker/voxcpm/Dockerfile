@@ -107,7 +107,7 @@ RUN pip install \
         wetext \
         "modelscope>=1.22.0" \
         "datasets>=3,<4" \
-        "huggingface-hub>=0.26,<1" \
+        "huggingface-hub>=0.26,<0.27" \
         tqdm \
         simplejson \
         sortedcontainers \
@@ -119,7 +119,10 @@ RUN pip install \
 
 # --- VoxCPM itself -------------------------------------------------------
 # --no-deps so VoxCPM's own pyproject cannot re-resolve torch/torchcodec/etc.
-ARG VOXCPM_REF=main
+# VOXCPM_REF pinned to the commit verified against this Dockerfile. Override
+# at build time (--build-arg VOXCPM_REF=main) only when intentionally
+# bumping; otherwise unattended builds stay reproducible.
+ARG VOXCPM_REF=1565e83ef
 RUN pip install --no-deps \
         "git+https://github.com/OpenBMB/VoxCPM.git@${VOXCPM_REF}"
 
