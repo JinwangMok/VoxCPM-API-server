@@ -124,10 +124,17 @@ RUN pip install --no-deps \
         "git+https://github.com/OpenBMB/VoxCPM.git@${VOXCPM_REF}"
 
 # --- Build-time verification --------------------------------------------
-# 1) Dependency graph is consistent (pip check)
-# 2) torch/torchaudio are exactly the cu130 wheels (no clobber)
-# 3) voxcpm imports cleanly (no transitive breakage from lazy code paths)
-RUN pip check
+# We deliberately skip `pip check` here: because VoxCPM was installed
+# with --no-deps, pip check will (correctly) complain that gradio, spaces,
+# and torchcodec are listed in VoxCPM's metadata but not installed. Those
+# exclusions are intentional — see comments on the Layer C install above.
+# The gates we actually care about are the import assertions below.
+#
+# The install step may surface a warning like
+#   `nvidia-cusparselt-cu13 0.8.0 is not supported on this platform`
+# That is a pip metadata quirk from the cu130 wheel bundle — torch uses
+# cusparselt only for specific sparse ops and the wheel still imports
+# fine on aarch64. If `import torch` succeeds below, we are OK.
 RUN python3 -c "\
 import torch, torchaudio; \
 assert torch.__version__ == '2.11.0+cu130', 'FATAL torch drift: ' + torch.__version__; \
