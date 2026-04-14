@@ -16,8 +16,11 @@ set -euo pipefail
 USER_NAME="${DOCKER_HUB_USER:-jinwangmok}"
 IMAGE="${IMAGE:-${USER_NAME}/voxcpm-api-server}"
 TAG="${TAG:-latest}"
+# Default to native arch. Building on the DGX Spark (aarch64) avoids
+# QEMU emulation, which has caused libtorch CUDA crashes on prior runs.
 PLATFORMS="${PLATFORMS:-linux/arm64}"
 PUSH="${PUSH:-1}"
+NO_CACHE="${NO_CACHE:-0}"
 CONTEXT_DIR="$(cd "$(dirname "$0")/.." && pwd)/docker/voxcpm"
 BUILDER_NAME="${BUILDER_NAME:-voxcpm-builder}"
 
@@ -43,6 +46,9 @@ BUILD_ARGS=(
   --tag "${IMAGE}:${TAG}"
   --file "${CONTEXT_DIR}/Dockerfile"
 )
+if [[ "${NO_CACHE}" == "1" ]]; then
+  BUILD_ARGS+=(--no-cache)
+fi
 
 if [[ "${PUSH}" == "1" ]]; then
   BUILD_ARGS+=(--push)
