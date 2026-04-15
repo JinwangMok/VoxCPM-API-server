@@ -21,7 +21,8 @@ tests/e2e.sh                  end-to-end check against a running instance
 
 | Endpoint | Status | Notes |
 |---|---|---|
-| `POST /v1/audio/speech` | ✅ | `model`, `input`, `voice`, `response_format`, `speed` |
+| `POST /v1/audio/speech` | ✅ | JSON mode: `model`, `input`, `voice`, `response_format`, `speed` |
+| `POST /v1/audio/speech` | ✅ | Multipart mode: upload reference/prompt audio for cloning |
 | `GET  /v1/models`       | ✅ | returns `voxcpm2` |
 | `GET  /health`          | ✅ | non-OpenAI liveness probe |
 
@@ -37,6 +38,67 @@ VoxCPM-specific knobs are exposed as optional extra fields:
 
 - `cfg_value` (float, default 2.0)
 - `inference_timesteps` (int, default 10)
+- `style_prompt` (string, optional natural-language steering)
+- `prompt_text` (string, required when `prompt_audio` is supplied)
+- `stream` (bool, default false; only `wav` / `pcm`)
+
+### JSON mode (OpenAI-compatible preset voices)
+
+```bash
+curl -X POST http://localhost:9100/v1/audio/speech \
+  -H 'Content-Type: application/json' \
+  -o out.wav \
+  -d '{
+    "model": "voxcpm2",
+    "voice": "nova",
+    "input": "Hello from the VoxCPM API server.",
+    "response_format": "wav"
+  }'
+```
+
+### JSON mode with custom voice/style description
+
+The `voice` field may also be a raw natural-language description.
+
+```bash
+curl -X POST http://localhost:9100/v1/audio/speech \
+  -H 'Content-Type: application/json' \
+  -o out.wav \
+  -d '{
+    "model": "voxcpm2",
+    "voice": "A warm middle-aged male voice, reflective and gentle",
+    "input": "This uses VoxCPM voice design with a custom description.",
+    "response_format": "wav"
+  }'
+```
+
+### Multipart mode for reference-audio cloning
+
+Use multipart form-data when you want to upload one or more reference clips.
+Repeated `reference_audio` parts are accepted; the server merges them into a
+single temporary reference WAV with short silence gaps. `prompt_audio` +
+`prompt_text` enables the higher-fidelity continuation-style cloning path.
+
+```bash
+curl -X POST http://localhost:9100/v1/audio/speech \
+  -o styled.wav \
+  -F model=voxcpm2 \
+  -F 'input=이 문장을 내 목소리 스타일로 읽어줘.' \
+  -F 'style_prompt=calm, slightly smiling, conversational' \
+  -F response_format=wav \
+  -F reference_audio=@samples/ref1.wav \
+  -F reference_audio=@samples/ref2.wav \
+  -F prompt_audio=@samples/prompt.wav \
+  -F 'prompt_text=프롬프트 오디오의 정확한 전사 텍스트'
+```
+
+Notes:
+
+- If `prompt_audio` is provided, `prompt_text` is required.
+- If you omit `voice` during multipart cloning, the uploaded reference audio
+  drives the timbre and the optional `style_prompt` steers expression.
+- If you include `voice` during multipart cloning, it can be either an OpenAI
+  preset name or a free-form description layered on top of the cloned voice.
 
 ## Environment
 

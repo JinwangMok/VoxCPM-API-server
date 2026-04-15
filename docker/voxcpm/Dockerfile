@@ -14,9 +14,9 @@
 #   - 25.12 → known torchaudio incompatibility on GB10
 #   - 26.02 → ships no torchaudio at all
 #
-# torchcodec is deliberately NOT installed: VoxCPM only imports it
-# lazily in the reference-audio voice-cloning path, which the OpenAI
-# Voice Design preset mapping never triggers. Avoiding it sidesteps
+# torchcodec is deliberately NOT installed. VoxCPM2 reference-audio cloning
+# in the pinned upstream revision is handled via librosa/audio_vae and does
+# not require torchcodec for this API server. Avoiding torchcodec sidesteps
 # torchcodec 0.8+'s hard dependency on libnvcuvid.so (not in cudnn-runtime).
 #
 # References:
